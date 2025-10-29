@@ -552,4 +552,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-*MedellínBot - Transforming citizen services through AI and cloud technology*
+*MedellínBot - Transforming citizen services through AI and cloud technology*"# Medell�nBot Project" 
