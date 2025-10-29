@@ -1,0 +1,46 @@
+# Core dependencies
+Flask==2.3.3
+Werkzeug==2.3.7
+requests==2.31.0
+
+# Google Cloud SDK
+google-cloud-firestore==2.15.0
+google-cloud-storage==2.10.0
+google-cloud-logging==3.5.0
+
+# Authentication and security
+PyJWT==2.8.0
+cryptography==41.0.7
+
+# Web server for production
+gunicorn==21.2.0
+
+# Async and concurrency
+asyncio==3.4.3
+concurrent-log-handler==0.9.25
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+python-dotenv==1.0.0
+
+# LLM Integration (uncomment based on provider)
+# google-cloud-aiplatform==1.46.0  # For Vertex AI
+# openai==1.35.12  # For OpenAI
+# anthropic==0.34.2  # For Claude
+
+# Vector search and embeddings
+# google-vertexai==1.51.0  # For Vertex AI Vector Search
+# pinecone-client==3.1.2  # For Pinecone
+# weaviate-client==4.10.1  # For Weaviate
+
+# Monitoring and observability
+google-cloud-monitoring==2.16.0
+google-cloud-trace==1.7.0
+
+# Development dependencies (uncomment for development)
+# flask-debugtoolbar==0.14.1
+# pytest==7.4.3
+# pytest-flask==1.2.0
+# black==23.9.1
+# flake8==6.1.0

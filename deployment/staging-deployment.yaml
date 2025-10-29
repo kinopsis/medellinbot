@@ -1,0 +1,279 @@
+# Staging Environment Deployment Configuration
+# Web Scraping Service for MedellínBot
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: medellinbot-staging
+  labels:
+    environment: staging
+    project: medellinbot
+    component: web-scraping
+
+---
+# ConfigMap for staging configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-scraping-config
+  namespace: medellinbot-staging
+data:
+  DATABASE_URL: "postgresql://staging_user:staging_password@staging-db:5432/staging_db"
+  GCP_PROJECT_ID: "medellinbot-staging-project"
+  GCS_BUCKET_NAME: "medellinbot-staging-data"
+  LOG_LEVEL: "DEBUG"
+  ENABLE_PROMETHEUS: "true"
+  PROMETHEUS_PORT: "8000"
+  SCRAPING_RATE_LIMIT: "1000"
+  SCRAPING_TIMEOUT: "900"
+  MONITORING_ENABLED: "true"
+
+---
+# Service Account for staging
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web-scraping-service-account
+  namespace: medellinbot-staging
+  labels:
+    app: web-scraping-service
+
+---
+# Role for service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: medellinbot-staging
+  name: web-scraping-role
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods", "services"]
+  verbs: ["get", "list", "watch"]
+
+---
+# Role Binding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-scraping-rolebinding
+  namespace: medellinbot-staging
+subjects:
+- kind: ServiceAccount
+  name: web-scraping-service-account
+  namespace: medellinbot-staging
+roleRef:
+  kind: Role
+  name: web-scraping-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment for Web Scraping Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-scraping-service
+  namespace: medellinbot-staging
+  labels:
+    app: web-scraping-service
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: web-scraping-service
+  template:
+    metadata:
+      labels:
+        app: web-scraping-service
+        version: v1
+    spec:
+      serviceAccountName: web-scraping-service-account
+      containers:
+      - name: web-scraping-service
+        image: us-central1-docker.pkg.dev/medellinbot-staging-project/web-scraping-repo/web-scraping-service:staging
+        ports:
+        - containerPort: 8000
+          name: http
+        - containerPort: 8080
+          name: metrics
+        envFrom:
+        - configMapRef:
+            name: web-scraping-config
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+
+---
+# Service for Web Scraping Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-scraping-service
+  namespace: medellinbot-staging
+  labels:
+    app: web-scraping-service
+spec:
+  selector:
+    app: web-scraping-service
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8000
+    protocol: TCP
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  type: ClusterIP
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-scraping-hpa
+  namespace: medellinbot-staging
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-scraping-service
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-scraping-network-policy
+  namespace: medellinbot-staging
+spec:
+  podSelector:
+    matchLabels:
+      app: web-scraping-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: medellinbot-staging
+    ports:
+    - protocol: TCP
+      port: 8000
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: medellinbot-staging
+    ports:
+    - protocol: TCP
+      port: 5432  # PostgreSQL
+    - protocol: TCP
+      port: 443   # HTTPS
+    - protocol: TCP
+      port: 80    # HTTP
+
+---
+# Prometheus ServiceMonitor for metrics collection
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: web-scraping-metrics
+  namespace: medellinbot-staging
+  labels:
+    app: web-scraping-service
+spec:
+  selector:
+    matchLabels:
+      app: web-scraping-service
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-scraping-pdb
+  namespace: medellinbot-staging
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: web-scraping-service
+
+---
+# ResourceQuota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: web-scraping-quota
+  namespace: medellinbot-staging
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    pods: "20"
+    services: "10"
+    configmaps: "10"
+    secrets: "10"

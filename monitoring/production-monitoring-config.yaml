@@ -1,0 +1,1001 @@
+# Production Environment Monitoring and Alerting Configuration
+# Web Scraping Service for MedellínBot
+
+---
+# Prometheus Configuration for Production
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config-production
+  namespace: medellinbot-production
+  labels:
+    app: prometheus
+    component: config
+    environment: production
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        environment: production
+        project: medellinbot
+        region: us-central1
+    
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+    
+    scrape_configs:
+      # Prometheus self-monitoring
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+      
+      # Web Scraping Service metrics
+      - job_name: 'web-scraping-service'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - medellinbot-production
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: web-scraping-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: metrics
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+      
+      # Cloud Run services metrics (via Cloud Monitoring)
+      - job_name: 'cloud-run-services'
+        gcp_sd_configs:
+          - project: 'medellinbot-prd-440915'
+            refresh_interval: 60s
+            port: 9090
+        relabel_configs:
+          - source_labels: [__meta_gcp_instance_name]
+            action: keep
+            regex: '.*cloud-run.*'
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+
+---
+# Enhanced AlertManager Configuration for Production
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config-production
+  namespace: medellinbot-production
+  labels:
+    app: alertmanager
+    component: config
+    environment: production
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'smtp.gmail.com:587'
+      smtp_from: 'alerts@medellinbot.com'
+      smtp_auth_username: 'alerts@medellinbot.com'
+      smtp_auth_password: 'YOUR_SMTP_PASSWORD'
+    
+    route:
+      group_by: ['alertname', 'environment', 'severity']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 2h
+      receiver: 'default-receiver'
+      routes:
+        - match:
+            severity: critical
+            environment: production
+          receiver: 'critical-alerts-production'
+          continue: true
+        - match:
+            severity: warning
+            environment: production
+          receiver: 'warning-alerts-production'
+          continue: true
+        - match:
+            severity: info
+          receiver: 'info-alerts'
+    
+    receivers:
+      - name: 'default-receiver'
+        slack_configs:
+          - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+            channel: '#alerts-general'
+            title: 'MedellínBot Alert'
+            text: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              *Environment:* {{ .Labels.environment }}
+              *Service:* {{ .Labels.service }}
+              {{ end }}
+      
+      - name: 'critical-alerts-production'
+        email_configs:
+          - to: 'ops-team@medellinbot.com,engineering-lead@medellinbot.com'
+            subject: '[CRITICAL] MedellínBot Production Alert'
+            body: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              *Environment:* {{ .Labels.environment }}
+              *Service:* {{ .Labels.service }}
+              *Instance:* {{ .Labels.instance }}
+              *Runbook:* {{ .Annotations.runbook_url }}
+              {{ end }}
+        slack_configs:
+          - api_url: 'https://hooks.slack.com/services/YOUR/CRITICAL/WEBHOOK'
+            channel: '#alerts-critical'
+            title: '🚨 CRITICAL - MedellínBot Production'
+            text: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              *Environment:* {{ .Labels.environment }}
+              *Service:* {{ .Labels.service }}
+              *Runbook:* {{ .Annotations.runbook_url }}
+              {{ end }}
+        pagerduty_configs:
+          - routing_key: 'YOUR_PAGERDUTY_INTEGRATION_KEY'
+            description: '{{ .GroupLabels.alertname }} - {{ .CommonAnnotations.summary }}'
+      
+      - name: 'warning-alerts-production'
+        email_configs:
+          - to: 'dev-team@medellinbot.com'
+            subject: '[WARNING] MedellínBot Production Alert'
+            body: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              *Environment:* {{ .Labels.environment }}
+              *Service:* {{ .Labels.service }}
+              {{ end }}
+        slack_configs:
+          - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+            channel: '#alerts-warning'
+            title: '⚠️ WARNING - MedellínBot Production'
+            text: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              *Environment:* {{ .Labels.environment }}
+              {{ end }}
+      
+      - name: 'info-alerts'
+        slack_configs:
+          - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+            channel: '#alerts-info'
+            title: 'ℹ️ INFO - MedellínBot'
+            text: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              {{ end }}
+
+---
+# Comprehensive Prometheus Rules for Production
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules-production
+  namespace: medellinbot-production
+  labels:
+    app: prometheus
+    component: rules
+    environment: production
+data:
+  web-scraping-rules.yml: |
+    groups:
+      - name: web_scraping_alerts_production
+        rules:
+          # Critical: Service Down
+          - alert: ServiceDown
+            expr: up{job="web-scraping-service"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/service-down"
+            annotations:
+              summary: "Service {{ $labels.instance }} is down"
+              description: "Service {{ $labels.instance }} has been down for more than 1 minute"
+          
+          # Critical: High Error Rate
+          - alert: HighErrorRate
+            expr: rate(web_scraping_errors_total[5m]) > 0.1
+            for: 2m
+            labels:
+              severity: critical
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/high-error-rate"
+            annotations:
+              summary: "High error rate detected"
+              description: "Error rate is {{ $value }} errors per second on {{ $labels.instance }}"
+          
+          # Critical: Database Connection Failure
+          - alert: DatabaseConnectionFailure
+            expr: web_scraping_database_connections_failed_total > 0
+            for: 1m
+            labels:
+              severity: critical
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/database-connection"
+            annotations:
+              summary: "Database connection failure"
+              description: "Database connection failed {{ $value }} times on {{ $labels.instance }}"
+          
+          # Critical: Scraper Timeout
+          - alert: ScraperTimeout
+            expr: web_scraping_scraper_duration_seconds > 300
+            for: 1m
+            labels:
+              severity: critical
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/scraper-timeout"
+            annotations:
+              summary: "Scraper timeout detected"
+              description: "Scraper {{ $labels.scraper_name }} has been running for {{ $value }} seconds"
+          
+          # Critical: Data Quality Critical
+          - alert: CriticalDataQuality
+            expr: web_scraping_data_quality_score < 0.5
+            for: 5m
+            labels:
+              severity: critical
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/data-quality"
+            annotations:
+              summary: "Critical data quality detected"
+              description: "Data quality score is {{ $value }} for {{ $labels.source }}"
+          
+          # Warning: High Memory Usage
+          - alert: HighMemoryUsage
+            expr: (container_memory_usage_bytes{pod=~"web-scraping-service.*"} / container_spec_memory_limit_bytes) > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/high-memory"
+            annotations:
+              summary: "High memory usage detected"
+              description: "Memory usage is {{ $value | humanizePercentage }} for pod {{ $labels.pod }}"
+          
+          # Warning: High CPU Usage
+          - alert: HighCPUUsage
+            expr: rate(container_cpu_usage_seconds_total{pod=~"web-scraping-service.*"}[5m]) > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/high-cpu"
+            annotations:
+              summary: "High CPU usage detected"
+              description: "CPU usage is {{ $value | humanizePercentage }} for pod {{ $labels.pod }}"
+          
+          # Warning: Pod CrashLooping
+          - alert: PodCrashLooping
+            expr: rate(kube_pod_container_status_restarts_total{pod=~"web-scraping-service.*"}[15m]) > 0
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/pod-crashloop"
+            annotations:
+              summary: "Pod is crash looping"
+              description: "Pod {{ $labels.pod }} is restarting frequently"
+          
+          # Warning: Low Data Quality
+          - alert: LowDataQuality
+            expr: web_scraping_data_quality_score < 0.7
+            for: 10m
+            labels:
+              severity: warning
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/data-quality"
+            annotations:
+              summary: "Low data quality detected"
+              description: "Data quality score is {{ $value }} for {{ $labels.source }}"
+          
+          # Warning: High Response Time
+          - alert: HighResponseTime
+            expr: histogram_quantile(0.95, rate(web_scraping_request_duration_seconds_bucket[5m])) > 3
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/high-response-time"
+            annotations:
+              summary: "High response time detected"
+              description: "95th percentile response time is {{ $value }}s"
+          
+          # Warning: Database Slow Queries
+          - alert: DatabaseSlowQueries
+            expr: histogram_quantile(0.95, rate(web_scraping_database_query_duration_seconds_bucket[5m])) > 5
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+              environment: production
+              runbook_url: "https://docs.medellinbot.com/runbooks/slow-queries"
+            annotations:
+              summary: "Slow database queries detected"
+              description: "95th percentile query time is {{ $value }}s"
+          
+          # Info: Deployment Success
+          - alert: DeploymentSuccessful
+            expr: increase(web_scraping_deployment_success_total[5m]) > 0
+            for: 0m
+            labels:
+              severity: info
+              service: web-scraping
+              environment: production
+            annotations:
+              summary: "Deployment successful"
+              description: "New version deployed successfully"
+          
+          # Info: Scraper Completed
+          - alert: ScraperCompleted
+            expr: increase(web_scraping_scraper_completed_total[1m]) > 0
+            for: 0m
+            labels:
+              severity: info
+              service: web-scraping
+              environment: production
+            annotations:
+              summary: "Scraper completed"
+              description: "Scraper {{ $labels.scraper_name }} completed successfully"
+
+---
+# Enhanced Grafana Dashboard Configuration for Production
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-production
+  namespace: medellinbot-production
+  labels:
+    app: grafana
+    component: dashboards
+    environment: production
+data:
+  web-scraping-dashboard-production.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "Web Scraping Service - Production",
+        "tags": ["medellinbot", "web-scraping", "production"],
+        "timezone": "browser",
+        "refresh": "30s",
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "panels": [
+          {
+            "id": 1,
+            "title": "Service Health Overview",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "up{job=\"web-scraping-service\"}",
+                "legendFormat": "Service Status"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "thresholds": {
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                },
+                "unit": "short"
+              }
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 3,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": 2,
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(web_scraping_requests_total[5m])",
+                "legendFormat": "Requests/sec"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Requests/sec",
+                "min": 0
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 8,
+              "x": 3,
+              "y": 0
+            }
+          },
+          {
+            "id": 3,
+            "title": "Error Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(web_scraping_errors_total[5m])",
+                "legendFormat": "Errors/sec"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Errors/sec",
+                "min": 0
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 8,
+              "x": 11,
+              "y": 0
+            }
+          },
+          {
+            "id": 4,
+            "title": "Response Time (95th percentile)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(web_scraping_request_duration_seconds_bucket[5m]))",
+                "legendFormat": "95th percentile"
+              },
+              {
+                "expr": "histogram_quantile(0.50, rate(web_scraping_request_duration_seconds_bucket[5m]))",
+                "legendFormat": "50th percentile"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Response Time (seconds)",
+                "min": 0
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 8,
+              "x": 19,
+              "y": 0
+            }
+          },
+          {
+            "id": 5,
+            "title": "Data Quality Scores",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "web_scraping_data_quality_score",
+                "legendFormat": "{{ source }}"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Quality Score (0-1)",
+                "min": 0,
+                "max": 1
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 8
+            }
+          },
+          {
+            "id": 6,
+            "title": "Resource Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "container_memory_usage_bytes{pod=~\"web-scraping-service.*\"}",
+                "legendFormat": "Memory - {{ pod }}"
+              },
+              {
+                "expr": "rate(container_cpu_usage_seconds_total{pod=~\"web-scraping-service.*\"}[5m])",
+                "legendFormat": "CPU - {{ pod }}"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 8
+            }
+          },
+          {
+            "id": 7,
+            "title": "Scraper Performance",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "web_scraping_scraper_duration_seconds",
+                "format": "table",
+                "legendFormat": "{{ scraper_name }}"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 24,
+              "x": 0,
+              "y": 16
+            }
+          },
+          {
+            "id": 8,
+            "title": "Database Metrics",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "web_scraping_database_connections_active",
+                "legendFormat": "Active Connections"
+              },
+              {
+                "expr": "histogram_quantile(0.95, rate(web_scraping_database_query_duration_seconds_bucket[5m]))",
+                "legendFormat": "Query Time 95th percentile"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 24
+            }
+          },
+          {
+            "id": 9,
+            "title": "Alert Status",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "ALERTS{alertstate=\"firing\"}",
+                "format": "table"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 24
+            }
+          }
+        ],
+        "templating": {
+          "list": [
+            {
+              "name": "environment",
+              "type": "query",
+              "query": "label_values(up, environment)",
+              "refresh": "on_dashboard_load",
+              "includeAll": false,
+              "multi": false
+            },
+            {
+              "name": "service",
+              "type": "query",
+              "query": "label_values(up{environment=\"$environment\"}, job)",
+              "refresh": "on_dashboard_load",
+              "includeAll": false,
+              "multi": false
+            }
+          ]
+        }
+      }
+    }
+
+---
+# Prometheus Deployment for Production
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-production
+  namespace: medellinbot-production
+  labels:
+    app: prometheus
+    environment: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: prometheus
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: prometheus
+        environment: production
+    spec:
+      serviceAccountName: prometheus
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - prometheus
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.40.0
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus/'
+          - '--web.console.libraries=/etc/prometheus/console_libraries'
+          - '--web.console.templates=/etc/prometheus/consoles'
+          - '--storage.tsdb.retention.time=30d'
+          - '--web.enable-lifecycle'
+          - '--web.enable-admin-api'
+        ports:
+        - containerPort: 9090
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1000m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/prometheus
+        - name: rules-volume
+          mountPath: /etc/prometheus/rules
+        - name: storage-volume
+          mountPath: /prometheus
+          subPath: prometheus
+      volumes:
+      - name: config-volume
+        configMap:
+          name: prometheus-config-production
+      - name: rules-volume
+        configMap:
+          name: prometheus-rules-production
+      - name: storage-volume
+        persistentVolumeClaim:
+          claimName: prometheus-pvc-production
+
+---
+# AlertManager Deployment for Production
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager-production
+  namespace: medellinbot-production
+  labels:
+    app: alertmanager
+    environment: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: alertmanager
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+        environment: production
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - alertmanager
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: alertmanager
+        image: prom/alertmanager:v0.25.0
+        args:
+          - '--config.file=/etc/alertmanager/alertmanager.yml'
+          - '--storage.path=/alertmanager'
+          - '--web.external-url=http://alertmanager.medellinbot-production.svc.cluster.local:9093'
+        ports:
+        - containerPort: 9093
+        resources:
+          requests:
+            memory: "200Mi"
+            cpu: "200m"
+          limits:
+            memory: "500Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/alertmanager
+        - name: storage-volume
+          mountPath: /alertmanager
+          subPath: alertmanager
+      volumes:
+      - name: config-volume
+        configMap:
+          name: alertmanager-config-production
+      - name: storage-volume
+        persistentVolumeClaim:
+          claimName: alertmanager-pvc-production
+
+---
+# Grafana Deployment for Production
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana-production
+  namespace: medellinbot-production
+  labels:
+    app: grafana
+    environment: production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: grafana
+        environment: production
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:9.0.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "admin123"
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-piechart-panel"
+        resources:
+          requests:
+            memory: "500Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: dashboards-volume
+          mountPath: /var/lib/grafana/dashboards
+        - name: config-volume
+          mountPath: /etc/grafana/provisioning
+      volumes:
+      - name: dashboards-volume
+        configMap:
+          name: grafana-dashboards-production
+      - name: config-volume
+        configMap:
+          name: grafana-config-production
+
+---
+# Services for Monitoring Stack (Production)
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service-production
+  namespace: medellinbot-production
+  labels:
+    app: prometheus
+    environment: production
+spec:
+  selector:
+    app: prometheus
+    environment: production
+  ports:
+  - port: 9090
+    targetPort: 9090
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-service-production
+  namespace: medellinbot-production
+  labels:
+    app: alertmanager
+    environment: production
+spec:
+  selector:
+    app: alertmanager
+    environment: production
+  ports:
+  - port: 9093
+    targetPort: 9093
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service-production
+  namespace: medellinbot-production
+  labels:
+    app: grafana
+    environment: production
+spec:
+  selector:
+    app: grafana
+    environment: production
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: LoadBalancer
+
+---
+# PersistentVolumeClaims for Monitoring Stack (Production)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc-production
+  namespace: medellinbot-production
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alertmanager-pvc-production
+  namespace: medellinbot-production
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# Service Accounts for Monitoring (Production)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: medellinbot-production
+  labels:
+    app: prometheus
+    environment: production
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: medellinbot-production
+
+---
+# Network Policies for Security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitoring-network-policy
+  namespace: medellinbot-production
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: medellinbot-production
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# Resource Quotas for Production
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: monitoring-resource-quota
+  namespace: medellinbot-production
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "10"

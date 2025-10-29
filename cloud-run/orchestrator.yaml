@@ -1,0 +1,60 @@
+# Cloud Run configuration for MedellínBot Orchestrator
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: medellinbot-orchestrator
+  namespace: default
+  annotations:
+    run.googleapis.com/execution-environment: gen2
+    run.googleapis.com/cpu-throttling: "false"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "50"
+        run.googleapis.com/timeout-seconds: "60"
+    spec:
+      containerConcurrency: 50
+      containers:
+      - image: us-central1-docker.pkg.dev/PROJECT_ID/medellinbot/orchestrator:latest
+        env:
+        - name: GOOGLE_CLOUD_PROJECT
+          value: "PROJECT_ID"
+        - name: ENVIRONMENT
+          value: "production"
+        - name: JWT_SECRET
+          value: "CHANGE_THIS_SECRET_IN_PRODUCTION"
+        - name: SESSION_TIMEOUT_HOURS
+          value: "24"
+        - name: MAX_MESSAGE_HISTORY
+          value: "50"
+        - name: CONFIDENCE_THRESHOLD
+          value: "0.7"
+        - name: TRAMITES_AGENT_URL
+          value: "https://medellinbot-tramites-PROJECT_ID.a.run.app"
+        - name: PQRSD_AGENT_URL
+          value: "https://medellinbot-pqrsd-PROJECT_ID.a.run.app"
+        - name: PROGRAMAS_AGENT_URL
+          value: "https://medellinbot-programas-PROJECT_ID.a.run.app"
+        - name: NOTIFICACIONES_AGENT_URL
+          value: "https://medellinbot-notificaciones-PROJECT_ID.a.run.app"
+        - name: LLM_PROVIDER
+          value: "vertex-ai"
+        - name: LLM_MODEL
+          value: "gemini-1.5-flash"
+        - name: LLM_TEMPERATURE
+          value: "0.3"
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: "4"
+            memory: "2Gi"
+          requests:
+            cpu: "2"
+            memory: "1Gi"
+      serviceAccountName: medellinbot-service-account@PROJECT_ID.iam.gserviceaccount.com
+  traffic:
+  - percent: 100
+    latestRevision: true

@@ -1,0 +1,174 @@
+// Firestore Security Rules for MedellínBot
+// Version: 1.0
+// Created: 2025-10-29
+
+rules_version = '2';
+service cloud.firestore {
+  
+  // Helper functions for authentication and authorization
+  function isAuthenticated() {
+    return request.auth != null;
+  }
+  
+  function isUser(userId) {
+    return isAuthenticated() && request.auth.uid == userId;
+  }
+  
+  function isAdmin() {
+    return isAuthenticated() && request.auth.token.admin == true;
+  }
+  
+  function isServiceAccount() {
+    return request.auth.token.service == true;
+  }
+  
+  function hasValidSession() {
+    return request.auth != null && 
+           request.auth.token.session_id != null &&
+           request.auth.token.exp > request.time;
+  }
+  
+  // Collection validation rules
+  match /databases/{database}/documents {
+    
+    // Users collection - manages user profiles and preferences
+    match /users/{userId} {
+      allow read: if isUser(userId) || isAdmin();
+      allow write: if isUser(userId) && isAdmin();
+      allow create: if isAdmin();
+      allow update: if isUser(userId) || isAdmin();
+      allow delete: if isAdmin();
+      
+      // Validate user data structure
+      function isValidUser() {
+        return request.resource.data.keys().hasAll(['created_at', 'last_active']) &&
+               request.resource.data.created_at is timestamp &&
+               request.resource.data.last_active is timestamp;
+      }
+    }
+    
+    // Sessions collection - conversation state management
+    match /sessions/{sessionId} {
+      allow read: if isAuthenticated() && 
+                  (isUser(getUserIdFromSession(sessionId)) || isAdmin());
+      allow write: if isAuthenticated() && 
+                   (isUser(getUserIdFromSession(sessionId)) || isAdmin());
+      
+      // Validate session data structure
+      function isValidSession() {
+        return request.resource.data.keys().hasAll(['user_id', 'created_at', 'last_active']) &&
+               request.resource.data.user_id is string &&
+               request.resource.data.created_at is timestamp &&
+               request.resource.data.last_active is timestamp;
+      }
+      
+      // Subcollection for session messages
+      match /sessions/{sessionId}/messages/{messageId} {
+        allow read: if isAuthenticated() && 
+                    (isUser(getUserIdFromSession(sessionId)) || isAdmin());
+        allow write: if isAuthenticated() && 
+                     (isUser(getUserIdFromSession(sessionId)) || isAdmin());
+        
+        function isValidMessage() {
+          return request.resource.data.keys().hasAll(['text', 'role', 'timestamp']) &&
+                 request.resource.data.role in ['user', 'agent', 'system'] &&
+                 request.resource.data.timestamp is timestamp;
+        }
+      }
+    }
+    
+    // Radicados collection - PQRSD tracking
+    match /radicados/{radicadoId} {
+      allow read: if isAuthenticated() && 
+                  (isUser(request.resource.data.user_id) || isAdmin());
+      allow write: if isAdmin() || isServiceAccount();
+      allow create: if isAdmin() || isServiceAccount();
+      
+      function isValidRadicado() {
+        return request.resource.data.keys().hasAll(['user_id', 'tipo', 'entidad', 'status', 'created_at']) &&
+               request.resource.data.user_id is string &&
+               request.resource.data.tipo in ['P', 'Q', 'R', 'S', 'D'] &&
+               request.resource.data.status in ['recibido', 'en_proceso', 'resuelto', 'cerrado'] &&
+               request.resource.data.created_at is timestamp;
+      }
+    }
+    
+    // Logs collection - audit and monitoring
+    match /logs/{logId} {
+      allow read: if isAdmin() || isServiceAccount();
+      allow write: if isAdmin() || isServiceAccount();
+      allow create: if isAdmin() || isServiceAccount();
+      
+      function isValidLog() {
+        return request.resource.data.keys().hasAll(['timestamp', 'component', 'action']) &&
+               request.resource.data.timestamp is timestamp &&
+               request.resource.data.component is string &&
+               request.resource.data.action is string;
+      }
+    }
+    
+    // Notifications collection - proactive alerts
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() || isServiceAccount();
+      
+      function isValidNotification() {
+        return request.resource.data.keys().hasAll(['title', 'message', 'created_at', 'target_users']) &&
+               request.resource.data.created_at is timestamp &&
+               request.resource.data.target_users is list;
+      }
+    }
+    
+    // Configuration collection - system settings
+    match /config/{configId} {
+      allow read: if isAdmin() || isServiceAccount();
+      allow write: if isAdmin();
+      
+      function isValidConfig() {
+        return request.resource.data.keys().hasAll(['updated_at', 'version']) &&
+               request.resource.data.updated_at is timestamp &&
+               request.resource.data.version is string;
+      }
+    }
+    
+    // Attachments collection - file references
+    match /attachments/{attachmentId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() || isServiceAccount();
+      
+      function isValidAttachment() {
+        return request.resource.data.keys().hasAll(['file_name', 'file_size', 'content_type', 'uploaded_at', 'uploaded_by']) &&
+               request.resource.data.file_size is int &&
+               request.resource.data.content_type is string &&
+               request.resource.data.uploaded_at is timestamp &&
+               request.resource.data.uploaded_by is string;
+      }
+    }
+  }
+  
+  // Helper functions
+  function getUserIdFromSession(sessionId) {
+    // Extract user_id from session document
+    return get(/databases/$(database)/documents/sessions/$(sessionId)).data.user_id;
+  }
+  
+  function isWithinTimeWindow(minutes) {
+    return request.time < request.auth.token.exp + duration.value(minutes, 'm');
+  }
+  
+  // Data validation functions
+  function isValidTimestampField(fieldName) {
+    return request.resource.data[fieldName] is timestamp;
+  }
+  
+  function isValidStringField(fieldName, minLength, maxLength) {
+    return request.resource.data[fieldName] is string &&
+           request.resource.data[fieldName].size() >= minLength &&
+           request.resource.data[fieldName].size() <= maxLength;
+  }
+  
+  function isValidEnumField(fieldName, validValues) {
+    return request.resource.data[fieldName] is string &&
+           request.resource.data[fieldName] in validValues;
+  }
+}
