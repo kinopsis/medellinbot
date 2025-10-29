@@ -1,0 +1,674 @@
+# Staging Environment Monitoring and Alerting Configuration
+# Web Scraping Service for MedellínBot
+
+---
+# Prometheus Configuration for Staging
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: medellinbot-staging
+  labels:
+    app: prometheus
+    component: config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        environment: staging
+        project: medellinbot
+    
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+    
+    scrape_configs:
+      # Prometheus self-monitoring
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+        
+      # Web Scraping Service metrics
+      - job_name: 'web-scraping-service'
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - medellinbot-staging
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: web-scraping-service
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: metrics
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+
+---
+# AlertManager Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: medellinbot-staging
+  labels:
+    app: alertmanager
+    component: config
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'localhost:587'
+      smtp_from: 'alerts@medellinbot.com'
+    
+    route:
+      group_by: ['alertname', 'environment']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'webhook-notifications'
+      routes:
+        - match:
+            severity: critical
+          receiver: 'critical-alerts'
+        - match:
+            severity: warning
+          receiver: 'warning-alerts'
+    
+    receivers:
+      - name: 'webhook-notifications'
+        webhook_configs:
+          - url: 'http://webhook-service:8080/alerts'
+            send_resolved: true
+      
+      - name: 'critical-alerts'
+        email_configs:
+          - to: 'ops-team@medellinbot.com'
+            subject: '[CRITICAL] MedellínBot Web Scraping Alert'
+            body: |
+              {{ range .Alerts }}
+              Alert: {{ .Annotations.summary }}
+              Description: {{ .Annotations.description }}
+              Severity: {{ .Labels.severity }}
+              Environment: {{ .Labels.environment }}
+              {{ end }}
+        slack_configs:
+          - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+            channel: '#alerts-critical'
+            title: 'Critical Alert - MedellínBot'
+            text: |
+              {{ range .Alerts }}
+              *Alert:* {{ .Annotations.summary }}
+              *Description:* {{ .Annotations.description }}
+              *Severity:* {{ .Labels.severity }}
+              {{ end }}
+      
+      - name: 'warning-alerts'
+        email_configs:
+          - to: 'dev-team@medellinbot.com'
+            subject: '[WARNING] MedellínBot Web Scraping Alert'
+            body: |
+              {{ range .Alerts }}
+              Alert: {{ .Annotations.summary }}
+              Description: {{ .Annotations.description }}
+              Severity: {{ .Labels.severity }}
+              Environment: {{ .Labels.environment }}
+              {{ end }}
+
+---
+# Prometheus Rules for Web Scraping Service
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: medellinbot-staging
+  labels:
+    app: prometheus
+    component: rules
+data:
+  web-scraping-rules.yml: |
+    groups:
+      - name: web_scraping_alerts
+        rules:
+          # High Error Rate
+          - alert: HighErrorRate
+            expr: rate(web_scraping_errors_total[5m]) > 0.1
+            for: 2m
+            labels:
+              severity: critical
+              service: web-scraping
+            annotations:
+              summary: "High error rate detected"
+              description: "Error rate is {{ $value }} errors per second"
+          
+          # Scraper Timeout
+          - alert: ScraperTimeout
+            expr: web_scraping_scraper_duration_seconds > 300
+            for: 1m
+            labels:
+              severity: warning
+              service: web-scraping
+            annotations:
+              summary: "Scraper timeout detected"
+              description: "Scraper {{ $labels.scraper_name }} has been running for {{ $value }} seconds"
+          
+          # Low Data Quality
+          - alert: LowDataQuality
+            expr: web_scraping_data_quality_score < 0.7
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+            annotations:
+              summary: "Low data quality detected"
+              description: "Data quality score is {{ $value }} for {{ $labels.source }}"
+          
+          # Database Connection Issues
+          - alert: DatabaseConnectionFailure
+            expr: web_scraping_database_connections_failed_total > 0
+            for: 1m
+            labels:
+              severity: critical
+              service: web-scraping
+            annotations:
+              summary: "Database connection failure"
+              description: "Database connection failed {{ $value }} times"
+          
+          # High Memory Usage
+          - alert: HighMemoryUsage
+            expr: (container_memory_usage_bytes{pod=~"web-scraping-service.*"} / container_spec_memory_limit_bytes) > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+            annotations:
+              summary: "High memory usage detected"
+              description: "Memory usage is {{ $value | humanizePercentage }} for pod {{ $labels.pod }}"
+          
+          # High CPU Usage
+          - alert: HighCPUUsage
+            expr: rate(container_cpu_usage_seconds_total{pod=~"web-scraping-service.*"}[5m]) > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              service: web-scraping
+            annotations:
+              summary: "High CPU usage detected"
+              description: "CPU usage is {{ $value | humanizePercentage }} for pod {{ $labels.pod }}"
+          
+          # Pod CrashLooping
+          - alert: PodCrashLooping
+            expr: rate(kube_pod_container_status_restarts_total{pod=~"web-scraping-service.*"}[15m]) > 0
+            for: 5m
+            labels:
+              severity: critical
+              service: web-scraping
+            annotations:
+              summary: "Pod is crash looping"
+              description: "Pod {{ $labels.pod }} is restarting frequently"
+          
+          # Service Down
+          - alert: ServiceDown
+            expr: up{job="web-scraping-service"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              service: web-scraping
+            annotations:
+              summary: "Service is down"
+              description: "Web scraping service is not responding to health checks"
+
+---
+# Grafana Dashboard Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: medellinbot-staging
+  labels:
+    app: grafana
+    component: dashboards
+data:
+  web-scraping-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "Web Scraping Service - Staging",
+        "tags": ["medellinbot", "web-scraping", "staging"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Service Health",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "up{job=\"web-scraping-service\"}",
+                "legendFormat": "Service Status"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "thresholds": {
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            },
+            "gridPos": {
+              "h": 4,
+              "w": 6,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": 2,
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(web_scraping_requests_total[5m])",
+                "legendFormat": "Requests/sec"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Requests/sec"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 6,
+              "y": 0
+            }
+          },
+          {
+            "id": 3,
+            "title": "Error Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(web_scraping_errors_total[5m])",
+                "legendFormat": "Errors/sec"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Errors/sec"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 18,
+              "y": 0
+            }
+          },
+          {
+            "id": 4,
+            "title": "Scraper Performance",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "web_scraping_scraper_duration_seconds",
+                "format": "table"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 24,
+              "x": 0,
+              "y": 8
+            }
+          },
+          {
+            "id": 5,
+            "title": "Data Quality Scores",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "web_scraping_data_quality_score",
+                "legendFormat": "{{ source }}"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Quality Score (0-1)",
+                "min": 0,
+                "max": 1
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 16
+            }
+          },
+          {
+            "id": 6,
+            "title": "Resource Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "container_memory_usage_bytes{pod=~\"web-scraping-service.*\"}",
+                "legendFormat": "Memory - {{ pod }}"
+              },
+              {
+                "expr": "rate(container_cpu_usage_seconds_total{pod=~\"web-scraping-service.*\"}[5m])",
+                "legendFormat": "CPU - {{ pod }}"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 16
+            }
+          }
+        ],
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
+
+---
+# Prometheus Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: medellinbot-staging
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus/'
+          - '--web.console.libraries=/etc/prometheus/console_libraries'
+          - '--web.console.templates=/etc/prometheus/consoles'
+          - '--storage.tsdb.retention.time=200h'
+          - '--web.enable-lifecycle'
+        ports:
+        - containerPort: 9090
+        resources:
+          requests:
+            memory: "500Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/prometheus
+        - name: rules-volume
+          mountPath: /etc/prometheus/rules
+        - name: storage-volume
+          mountPath: /prometheus
+          subPath: prometheus
+      volumes:
+      - name: config-volume
+        configMap:
+          name: prometheus-config
+      - name: rules-volume
+        configMap:
+          name: prometheus-rules
+      - name: storage-volume
+        persistentVolumeClaim:
+          claimName: prometheus-pvc
+
+---
+# AlertManager Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: medellinbot-staging
+  labels:
+    app: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+      - name: alertmanager
+        image: prom/alertmanager:latest
+        args:
+          - '--config.file=/etc/alertmanager/alertmanager.yml'
+          - '--storage.path=/alertmanager'
+        ports:
+        - containerPort: 9093
+        resources:
+          requests:
+            memory: "100Mi"
+            cpu: "100m"
+          limits:
+            memory: "200Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/alertmanager
+        - name: storage-volume
+          mountPath: /alertmanager
+          subPath: alertmanager
+      volumes:
+      - name: config-volume
+        configMap:
+          name: alertmanager-config
+      - name: storage-volume
+        persistentVolumeClaim:
+          claimName: alertmanager-pvc
+
+---
+# Grafana Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: medellinbot-staging
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "admin"
+        resources:
+          requests:
+            memory: "100Mi"
+            cpu: "100m"
+          limits:
+            memory: "200Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: dashboards-volume
+          mountPath: /var/lib/grafana/dashboards
+        - name: config-volume
+          mountPath: /etc/grafana/provisioning
+      volumes:
+      - name: dashboards-volume
+        configMap:
+          name: grafana-dashboards
+      - name: config-volume
+        configMap:
+          name: grafana-config
+
+---
+# Services for Monitoring Stack
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: medellinbot-staging
+  labels:
+    app: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-service
+  namespace: medellinbot-staging
+  labels:
+    app: alertmanager
+spec:
+  selector:
+    app: alertmanager
+  ports:
+  - port: 9093
+    targetPort: 9093
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service
+  namespace: medellinbot-staging
+  labels:
+    app: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: LoadBalancer
+
+---
+# PersistentVolumeClaims for Monitoring Stack
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: medellinbot-staging
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alertmanager-pvc
+  namespace: medellinbot-staging
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+# Service Accounts for Monitoring
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: medellinbot-staging
+  labels:
+    app: prometheus
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: medellinbot-staging

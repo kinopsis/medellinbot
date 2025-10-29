@@ -1,0 +1,40 @@
+# Cloud Run service configuration for Web Scraping Service
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: web-scraping-service
+  namespace: default
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 900  # 15 minutes for long-running scrapers
+      containers:
+      - image: us-central1-docker.pkg.dev/PROJECT_ID/web-scraping-repo/web-scraping-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://USER:PASSWORD@HOST:PORT/DATABASE"
+        - name: GCP_PROJECT_ID
+          value: "PROJECT_ID"
+        - name: GCS_BUCKET_NAME
+          value: "web-scraping-data-bucket"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: ENABLE_PROMETHEUS
+          value: "true"
+        - name: PROMETHEUS_PORT
+          value: "8000"
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+      serviceAccountName: web-scraping-service-account@PROJECT_ID.iam.gserviceaccount.com
+  traffic:
+  - percent: 100
+    latestRevision: true
